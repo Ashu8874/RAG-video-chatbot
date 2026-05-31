@@ -168,32 +168,65 @@ def transcribe_with_whisper(url: str) -> str:
 
 def get_youtube_data(url: str) -> dict:
     logger.info("Fetching YouTube data for: %s", url)
+    
+    # Clean URL first
     video_id = extract_youtube_id(url)
-    ydl_opts = ytdlp_common_options()
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=False)
+    clean_url = f"https://www.youtube.com/watch?v={video_id}"
+
+    # Get transcript via API (no bot detection)
     try:
         raw = YouTubeTranscriptApi.get_transcript(video_id)
         transcript = " ".join(t["text"] for t in raw)
-    except (TranscriptsDisabled, NoTranscriptFound):
-        logger.warning("No subtitles - falling back to Whisper")
-        transcript = transcribe_with_whisper(url)
+    except Exception as e:
+        raise ValueError(f"Could not get transcript: {e}")
+
+    # Get metadata via yt-dlp with extra options
+    ydl_opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "skip_download": True,
+        # Add these to avoid bot detection
+        "extractor_args": {
+            "youtube": {
+                "skip": ["dash", "hls"]
+            }
+        },
+        "http_headers": {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        }
+    }
+    
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(clean_url, download=False)
+    except Exception as e:
+        logger.warning("yt-dlp metadata failed, using defaults: %s", e)
+        # Return basic data with transcript if yt-dlp fails
+        info = {}
+
     return {
-        "video_id": "A", "source": "youtube", "url": url,
+        "video_id": "A",
+        "source": "youtube",
+        "url": clean_url,
         "transcript": transcript,
-        "views": normalize_count(info.get("view_count")),
-        "likes": normalize_count(info.get("like_count")),
-        "comments": normalize_count(info.get("comment_count")),
-        "creator": info.get("uploader") or "Unknown",
-        "follower_count": normalize_count(info.get("channel_follower_count")),
+        "views": info.get("view_count") or 0,
+        "likes": info.get("like_count") or 0,
+        "comments": info.get("comment_count") or 0,
+        "creator": info.get("uploader") or "YouTube Creator",
+        "follower_count": info.get("channel_follower_count") or 0,
         "upload_date": info.get("upload_date") or "Unknown",
         "duration": info.get("duration") or 0,
-        "title": info.get("title") or "Unknown",
+        "title": info.get("title") or "YouTube Video",
         "hashtags": (info.get("tags") or [])[:10],
         "thumbnail": info.get("thumbnail") or "",
     }
 
 def get_instagram_data(url: str) -> dict:
+    # Clean URL - remove everything after ?
+    url = url.split("?")[0]
+    if not url.endswith("/"):
+        url += "/"
     logger.info("Fetching Instagram data for: %s", url)
     transcript = transcribe_with_whisper(url)
     yt_info = {}
