@@ -166,62 +166,30 @@ def transcribe_with_whisper(url: str) -> str:
             result = model.transcribe(audio_path, fp16=False)
         return result["text"].strip()
 
-def get_youtube_data(url: str) -> dict:
-    logger.info("Fetching YouTube data for: %s", url)
-    
-    # Clean URL first
-    video_id = extract_youtube_id(url)
-    clean_url = f"https://www.youtube.com/watch?v={video_id}"
-
-    # Get transcript via API (no bot detection)
+def get_youtube_stats(video_id: str) -> dict:
+    api_key = os.getenv("YOUTUBE_API_KEY", "")
+    if not api_key:
+        return {}
     try:
-        raw = YouTubeTranscriptApi.get_transcript(video_id)
-        transcript = " ".join(t["text"] for t in raw)
-    except Exception as e:
-        raise ValueError(f"Could not get transcript: {e}")
-
-    # Get metadata via yt-dlp with extra options
-    ydl_opts = {
-        "quiet": True,
-        "no_warnings": True,
-        "noplaylist": True,
-        "skip_download": True,
-        # Add these to avoid bot detection
-        "extractor_args": {
-            "youtube": {
-                "skip": ["dash", "hls"]
-            }
-        },
-        "http_headers": {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        import httpx
+        url = f"https://www.googleapis.com/youtube/v3/videos?part=statistics,snippet&id={video_id}&key={api_key}"
+        resp = httpx.get(url, timeout=10)
+        data = resp.json()
+        item = data["items"][0]
+        stats = item["statistics"]
+        snippet = item["snippet"]
+        return {
+            "views": int(stats.get("viewCount", 0)),
+            "likes": int(stats.get("likeCount", 0)),
+            "comments": int(stats.get("commentCount", 0)),
+            "title": snippet.get("title", ""),
+            "creator": snippet.get("channelTitle", ""),
+            "upload_date": snippet.get("publishedAt", "")[:10].replace("-", ""),
+            "hashtags": snippet.get("tags", [])[:10],
         }
-    }
-    
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(clean_url, download=False)
     except Exception as e:
-        logger.warning("yt-dlp metadata failed, using defaults: %s", e)
-        # Return basic data with transcript if yt-dlp fails
-        info = {}
-
-    return {
-        "video_id": "A",
-        "source": "youtube",
-        "url": clean_url,
-        "transcript": transcript,
-        "views": info.get("view_count") or 0,
-        "likes": info.get("like_count") or 0,
-        "comments": info.get("comment_count") or 0,
-        "creator": info.get("uploader") or "YouTube Creator",
-        "follower_count": info.get("channel_follower_count") or 0,
-        "upload_date": info.get("upload_date") or "Unknown",
-        "duration": info.get("duration") or 0,
-        "title": info.get("title") or "YouTube Video",
-        "hashtags": (info.get("tags") or [])[:10],
-        "thumbnail": info.get("thumbnail") or "",
-    }
-
+        logger.warning("YouTube API stats failed: %s", e)
+        return {}
 def get_instagram_data(url: str) -> dict:
     # Clean URL - remove everything after ?
     url = url.split("?")[0]
