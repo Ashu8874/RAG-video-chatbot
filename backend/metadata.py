@@ -166,30 +166,79 @@ def transcribe_with_whisper(url: str) -> str:
             result = model.transcribe(audio_path, fp16=False)
         return result["text"].strip()
 
-def get_youtube_stats(video_id: str) -> dict:
-    api_key = os.getenv("YOUTUBE_API_KEY", "")
-    if not api_key:
-        return {}
+def get_youtube_data(url: str) -> dict:
+    logger.info("Fetching YouTube data for: %s", url)
+    video_id = extract_youtube_id(url)
+
+    # Use proxy to bypass YouTube IP blocks on cloud servers
+    try:
+        from youtube_transcript_api import YouTubeTranscriptApi
+        from youtube_transcript_api.proxies import WebshareProxyConfig
+
+        # Option 1 — No proxy config (try direct first)
+        ytt = YouTubeTranscriptApi()
+        raw = ytt.fetch(video_id)
+        transcript = " ".join(t.text for t in raw)
+
+    except Exception as e:
+        logger.warning("Direct transcript failed: %s", e)
+        # Option 2 — Use ScraperAPI free proxy
+        try:
+            transcript = get_transcript_via_scraper(video_id)
+        except Exception as e2:
+            raise ValueError(f"All transcript methods failed: {e2}")
+
+    # Get metadata via oEmbed (never blocked)
     try:
         import httpx
-        url = f"https://www.googleapis.com/youtube/v3/videos?part=statistics,snippet&id={video_id}&key={api_key}"
-        resp = httpx.get(url, timeout=10)
-        data = resp.json()
-        item = data["items"][0]
-        stats = item["statistics"]
-        snippet = item["snippet"]
-        return {
-            "views": int(stats.get("viewCount", 0)),
-            "likes": int(stats.get("likeCount", 0)),
-            "comments": int(stats.get("commentCount", 0)),
-            "title": snippet.get("title", ""),
-            "creator": snippet.get("channelTitle", ""),
-            "upload_date": snippet.get("publishedAt", "")[:10].replace("-", ""),
-            "hashtags": snippet.get("tags", [])[:10],
-        }
-    except Exception as e:
-        logger.warning("YouTube API stats failed: %s", e)
-        return {}
+        oembed = httpx.get(
+            f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={video_id}&format=json",
+            timeout=10
+        ).json()
+        title = oembed.get("title", "YouTube Video")
+        creator = oembed.get("author_name", "Unknown")
+    except Exception:
+        title = "YouTube Video"
+        creator = "Unknown"
+
+    stats = get_youtube_stats(video_id)
+
+    return {
+        "video_id": "A",
+        "source": "youtube",
+        "url": f"https://www.youtube.com/watch?v={video_id}",
+        "transcript": transcript,
+        "views": stats.get("views", 0),
+        "likes": stats.get("likes", 0),
+        "comments": stats.get("comments", 0),
+        "creator": stats.get("creator", creator),
+        "follower_count": 0,
+        "upload_date": stats.get("upload_date", "Unknown"),
+        "duration": 0,
+        "title": stats.get("title", title),
+        "hashtags": stats.get("hashtags", []),
+        "thumbnail": f"https://img.youtube.com/vi/{video_id}/maxresdefault.jpg",
+    }
+
+
+def get_transcript_via_scraper(video_id: str) -> str:
+    """Fallback: fetch transcript via ScraperAPI proxy"""
+    import httpx
+    import json
+
+    scraper_key = os.getenv("SCRAPER_API_KEY", "")
+    if not scraper_key:
+        raise ValueError("No SCRAPER_API_KEY set")
+
+    # ScraperAPI proxies the request through residential IPs
+    target = f"https://www.youtube.com/watch?v={video_id}"
+    proxy_url = f"http://api.scraperapi.com?api_key={scraper_key}&url={target}"
+
+    resp = httpx.get(proxy_url, timeout=30)
+
+    # Extract transcript from page (basic approach)
+    # Better: use AssemblyAI or Deepgram instead
+    raise ValueError("ScraperAPI transcript extraction not implemented - use AssemblyAI")
 def get_instagram_data(url: str) -> dict:
     # Clean URL - remove everything after ?
     url = url.split("?")[0]
