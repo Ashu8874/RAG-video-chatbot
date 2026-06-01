@@ -4,9 +4,11 @@ import logging
 import shutil
 import tempfile
 import warnings
+from urllib.parse import quote_plus
 import whisper
 import yt_dlp
 import instaloader
+import httpx
 from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api._errors import TranscriptsDisabled, NoTranscriptFound
 from config import settings
@@ -31,6 +33,40 @@ def ytdlp_common_options() -> dict:
 
 def has_instagram_auth() -> bool:
     return bool(settings.INSTAGRAM_COOKIES_FILE or settings.YTDLP_COOKIES_FROM_BROWSER)
+
+def build_meta_access_token() -> str:
+    if settings.META_ACCESS_TOKEN:
+        return settings.META_ACCESS_TOKEN
+    if settings.META_APP_ID and settings.META_APP_SECRET:
+        return f"{settings.META_APP_ID}|{settings.META_APP_SECRET}"
+    return ""
+
+def fetch_instagram_oembed(url: str) -> dict:
+    access_token = build_meta_access_token()
+    if not access_token:
+        return {}
+
+    encoded_url = quote_plus(url)
+    oembed_url = (
+        "https://graph.facebook.com/v24.0/instagram_oembed"
+        f"?url={encoded_url}&access_token={access_token}"
+    )
+    try:
+        resp = httpx.get(oembed_url, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        return {
+            "author_name": data.get("author_name", ""),
+            "author_url": data.get("author_url", ""),
+            "html": data.get("html", ""),
+            "title": data.get("title", ""),
+            "thumbnail_url": data.get("thumbnail_url", ""),
+            "type": data.get("type", ""),
+            "provider_name": data.get("provider_name", ""),
+        }
+    except Exception as e:
+        logger.warning("Instagram oEmbed failed: %s", e)
+        return {}
 
 def extract_youtube_id(url: str) -> str:
     patterns = [
@@ -120,6 +156,9 @@ def compute_engagement(data: dict) -> dict:
 def finalize_instagram_data(data: dict) -> dict:
     data["metadata_note"] = instagram_metadata_note(data)
     return data
+
+def instagram_url_from_oembed(oembed: dict) -> str:
+    return oembed.get("author_url") or ""
 
 def youtube_metadata_note(data: dict) -> str:
     missing = []
@@ -314,6 +353,7 @@ def get_instagram_data(url: str) -> dict:
         url += "/"
     logger.info("Fetching Instagram data for: %s", url)
     transcript = safe_transcribe(url, "Instagram")
+    oembed = fetch_instagram_oembed(url)
     yt_info = {}
     try:
         with yt_dlp.YoutubeDL(ytdlp_common_options()) as ydl:
@@ -325,21 +365,25 @@ def get_instagram_data(url: str) -> dict:
         logger.info("Using public Instagram metadata from yt-dlp; authenticated Instaloader is not configured")
         info = yt_info
         if not info:
-            with yt_dlp.YoutubeDL(ytdlp_common_options()) as ydl:
-                info = ydl.extract_info(url, download=False)
+            try:
+                with yt_dlp.YoutubeDL(ytdlp_common_options()) as ydl:
+                    info = ydl.extract_info(url, download=False)
+            except Exception as e:
+                logger.warning("Second-pass yt-dlp Instagram fallback failed: %s", e)
+                info = {}
         return finalize_instagram_data({
             "video_id": "B", "source": "instagram", "url": url,
             "transcript": transcript,
             "views": normalize_count(info.get("view_count")),
             "likes": normalize_count(info.get("like_count")),
             "comments": normalize_count(info.get("comment_count")),
-            "creator": info.get("uploader") or "Unknown",
+            "creator": oembed.get("author_name") or info.get("uploader") or "Unknown",
             "follower_count": normalize_count(info.get("channel_follower_count")),
             "upload_date": info.get("upload_date") or "Unknown",
             "duration": info.get("duration") or 0,
-            "title": (info.get("title") or "")[:120],
+            "title": (oembed.get("title") or info.get("title") or "")[:120],
             "hashtags": (info.get("tags") or [])[:10],
-            "thumbnail": info.get("thumbnail") or "",
+            "thumbnail": oembed.get("thumbnail_url") or info.get("thumbnail") or "",
         })
 
     try:
@@ -352,34 +396,38 @@ def get_instagram_data(url: str) -> dict:
             "views": first_positive_or_available(post.video_view_count, yt_info.get("view_count")),
             "likes": first_available(post.likes, yt_info.get("like_count")),
             "comments": first_available(post.comments, yt_info.get("comment_count")),
-            "creator": post.owner_username or yt_info.get("uploader") or "Unknown",
+            "creator": post.owner_username or oembed.get("author_name") or yt_info.get("uploader") or "Unknown",
             "follower_count": first_available(
                 getattr(post.owner_profile, "followers", None),
                 yt_info.get("channel_follower_count"),
             ),
             "upload_date": str(post.date),
             "duration": post.video_duration or yt_info.get("duration") or 0,
-            "title": (post.caption or yt_info.get("title") or "")[:120],
+            "title": (post.caption or oembed.get("title") or yt_info.get("title") or "")[:120],
             "hashtags": (list(post.caption_hashtags) or (yt_info.get("tags") or []))[:10],
-            "thumbnail": post.url or yt_info.get("thumbnail") or "",
+            "thumbnail": oembed.get("thumbnail_url") or post.url or yt_info.get("thumbnail") or "",
         })
     except Exception as e:
         logger.warning("instaloader failed (%s) - using yt-dlp fallback", e)
         info = yt_info
         if not info:
-            with yt_dlp.YoutubeDL(ytdlp_common_options()) as ydl:
-                info = ydl.extract_info(url, download=False)
+            try:
+                with yt_dlp.YoutubeDL(ytdlp_common_options()) as ydl:
+                    info = ydl.extract_info(url, download=False)
+            except Exception as inner:
+                logger.warning("yt-dlp Instagram fallback failed after instaloader error: %s", inner)
+                info = {}
         return finalize_instagram_data({
             "video_id": "B", "source": "instagram", "url": url,
             "transcript": transcript,
             "views": normalize_count(info.get("view_count")),
             "likes": normalize_count(info.get("like_count")),
             "comments": normalize_count(info.get("comment_count")),
-            "creator": info.get("uploader") or "Unknown",
+            "creator": oembed.get("author_name") or info.get("uploader") or "Unknown",
             "follower_count": normalize_count(info.get("channel_follower_count")),
             "upload_date": info.get("upload_date") or "Unknown",
             "duration": info.get("duration") or 0,
-            "title": (info.get("title") or "")[:120],
+            "title": (oembed.get("title") or info.get("title") or "")[:120],
             "hashtags": (info.get("tags") or [])[:10],
-            "thumbnail": info.get("thumbnail") or "",
+            "thumbnail": oembed.get("thumbnail_url") or info.get("thumbnail") or "",
         })
