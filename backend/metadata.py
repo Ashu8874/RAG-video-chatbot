@@ -184,8 +184,52 @@ def transcribe_with_whisper(url: str) -> str:
             result = model.transcribe(audio_path, fp16=False)
         return result["text"].strip()
 
-def safe_transcribe_with_whisper(url: str, platform: str) -> str:
+def select_best_audio_url(info: dict) -> str | None:
+    formats = info.get("formats") or []
+    audio_formats = [
+        fmt for fmt in formats
+        if fmt.get("url") and (fmt.get("acodec") not in (None, "none") or fmt.get("vcodec") == "none")
+    ]
+    if audio_formats:
+        audio_formats.sort(key=lambda fmt: (
+            fmt.get("abr") or 0,
+            fmt.get("tbr") or 0,
+            fmt.get("filesize") or 0,
+        ), reverse=True)
+        return audio_formats[0]["url"]
+    return info.get("url")
+
+def transcribe_with_assemblyai(url: str) -> str:
+    api_key = settings.ASSEMBLYAI_API_KEY
+    if not api_key:
+        raise RuntimeError("ASSEMBLYAI_API_KEY is not configured")
+
     try:
+        import assemblyai as aai
+    except ImportError as e:
+        raise RuntimeError("assemblyai package is not installed") from e
+
+    with yt_dlp.YoutubeDL(ytdlp_common_options()) as ydl:
+        info = ydl.extract_info(url, download=False)
+
+    media_url = select_best_audio_url(info)
+    if not media_url:
+        raise RuntimeError("Could not resolve a direct media URL for AssemblyAI")
+
+    aai.settings.api_key = api_key
+    transcriber = aai.Transcriber()
+    transcript = transcriber.transcribe(media_url)
+    if getattr(transcript, "status", None) == "error":
+        raise RuntimeError(getattr(transcript, "error", "AssemblyAI transcription failed"))
+    return (getattr(transcript, "text", "") or "").strip()
+
+def safe_transcribe(url: str, platform: str) -> str:
+    try:
+        if settings.ASSEMBLYAI_API_KEY:
+            try:
+                return transcribe_with_assemblyai(url)
+            except Exception as e:
+                logger.warning("%s AssemblyAI transcription failed for %s: %s", platform, url, e)
         return transcribe_with_whisper(url)
     except Exception as e:
         logger.warning("%s transcription unavailable for %s: %s", platform, url, e)
@@ -233,8 +277,8 @@ def get_youtube_data(url: str) -> dict:
     video_id = extract_youtube_id(url)
     transcript = get_youtube_transcript(video_id)
     if not transcript:
-        logger.info("Falling back to Whisper transcription for YouTube video %s", video_id)
-        transcript = safe_transcribe_with_whisper(url, "YouTube")
+        logger.info("Falling back to external transcription for YouTube video %s", video_id)
+        transcript = safe_transcribe(url, "YouTube")
 
     yt_info = {}
     try:
@@ -269,7 +313,7 @@ def get_instagram_data(url: str) -> dict:
     if not url.endswith("/"):
         url += "/"
     logger.info("Fetching Instagram data for: %s", url)
-    transcript = safe_transcribe_with_whisper(url, "Instagram")
+    transcript = safe_transcribe(url, "Instagram")
     yt_info = {}
     try:
         with yt_dlp.YoutubeDL(ytdlp_common_options()) as ydl:
