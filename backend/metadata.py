@@ -121,6 +121,24 @@ def finalize_instagram_data(data: dict) -> dict:
     data["metadata_note"] = instagram_metadata_note(data)
     return data
 
+def youtube_metadata_note(data: dict) -> str:
+    missing = []
+    if data.get("views") is None:
+        missing.append("views")
+    if data.get("follower_count") is None:
+        missing.append("channel subscriber count")
+    if not missing:
+        return ""
+    return (
+        "YouTube did not expose "
+        + " and ".join(missing)
+        + " from the public endpoint. Some videos or channels may hide these fields."
+    )
+
+def finalize_youtube_data(data: dict) -> dict:
+    data["metadata_note"] = youtube_metadata_note(data)
+    return data
+
 def transcribe_with_whisper(url: str) -> str:
     with tempfile.TemporaryDirectory() as tmpdir:
         audio_path = os.path.join(tmpdir, "audio.mp3")
@@ -190,6 +208,54 @@ def get_youtube_stats(video_id: str) -> dict:
     except Exception as e:
         logger.warning("YouTube API stats failed: %s", e)
         return {}
+
+def get_youtube_transcript(video_id: str) -> str:
+    try:
+        transcript_parts = YouTubeTranscriptApi.get_transcript(video_id, languages=["en"])
+        return " ".join(part.get("text", "") for part in transcript_parts).strip()
+    except (TranscriptsDisabled, NoTranscriptFound, Exception) as e:
+        logger.warning("YouTube transcript unavailable for %s: %s", video_id, e)
+        return ""
+
+def get_youtube_data(url: str) -> dict:
+    url = url.split("?")[0]
+    if not url.endswith("/"):
+        url += "/"
+
+    logger.info("Fetching YouTube data for: %s", url)
+    video_id = extract_youtube_id(url)
+    transcript = get_youtube_transcript(video_id)
+    if not transcript:
+        logger.info("Falling back to Whisper transcription for YouTube video %s", video_id)
+        transcript = transcribe_with_whisper(url)
+
+    yt_info = {}
+    try:
+        with yt_dlp.YoutubeDL(ytdlp_common_options()) as ydl:
+            yt_info = ydl.extract_info(url, download=False)
+    except Exception as e:
+        logger.warning("yt-dlp YouTube metadata failed: %s", e)
+
+    yt_stats = get_youtube_stats(video_id)
+    info = {**yt_stats, **yt_info}
+
+    return finalize_youtube_data({
+        "video_id": "A",
+        "source": "youtube",
+        "url": url,
+        "transcript": transcript,
+        "views": first_positive_or_available(info.get("view_count"), yt_stats.get("views")),
+        "likes": first_available(info.get("like_count"), yt_stats.get("likes")),
+        "comments": first_available(info.get("comment_count"), yt_stats.get("comments")),
+        "creator": info.get("uploader") or yt_stats.get("creator") or "Unknown",
+        "follower_count": first_available(info.get("channel_follower_count"), yt_stats.get("follower_count")),
+        "upload_date": info.get("upload_date") or yt_stats.get("upload_date") or "Unknown",
+        "duration": info.get("duration") or 0,
+        "title": (info.get("title") or yt_stats.get("title") or "")[:120],
+        "hashtags": (info.get("tags") or yt_stats.get("hashtags") or [])[:10],
+        "thumbnail": info.get("thumbnail") or "",
+    })
+
 def get_instagram_data(url: str) -> dict:
     # Clean URL - remove everything after ?
     url = url.split("?")[0]
