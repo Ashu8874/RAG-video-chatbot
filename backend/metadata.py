@@ -184,6 +184,13 @@ def transcribe_with_whisper(url: str) -> str:
             result = model.transcribe(audio_path, fp16=False)
         return result["text"].strip()
 
+def safe_transcribe_with_whisper(url: str, platform: str) -> str:
+    try:
+        return transcribe_with_whisper(url)
+    except Exception as e:
+        logger.warning("%s transcription unavailable for %s: %s", platform, url, e)
+        return ""
+
 def get_youtube_stats(video_id: str) -> dict:
     api_key = os.getenv("YOUTUBE_API_KEY", "")
     if not api_key:
@@ -227,7 +234,7 @@ def get_youtube_data(url: str) -> dict:
     transcript = get_youtube_transcript(video_id)
     if not transcript:
         logger.info("Falling back to Whisper transcription for YouTube video %s", video_id)
-        transcript = transcribe_with_whisper(url)
+        transcript = safe_transcribe_with_whisper(url, "YouTube")
 
     yt_info = {}
     try:
@@ -262,7 +269,7 @@ def get_instagram_data(url: str) -> dict:
     if not url.endswith("/"):
         url += "/"
     logger.info("Fetching Instagram data for: %s", url)
-    transcript = transcribe_with_whisper(url)
+    transcript = safe_transcribe_with_whisper(url, "Instagram")
     yt_info = {}
     try:
         with yt_dlp.YoutubeDL(ytdlp_common_options()) as ydl:
